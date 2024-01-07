@@ -1,62 +1,44 @@
-import numpy as np
-import os, yaml, random, argparse
+import os, yaml, argparse, torch
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.backends.cudnn as cudnn
+from tokenizers import Tokenizer
+from tokenizers.processors import TemplateProcessing
 
-from modules.data import load_dataloader
-from models.downstream import FusedModel, AddTopModel
-
-from modules.test import Tester
-from modules.train import Trainer
-from modules.inference import Translator
-
-import transformers as T
+from transformer import set_seed, AutoTokenizer
 
 
-def set_seed(SEED=42):
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    torch.cuda.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
-    cudnn.benchmark = False
-    cudnn.deterministic = True
+from module import (
+    load_dataloader,
+    load_model,
+    Trainer,
+    Tester,
+    Generator
+)
+
+
 
 
 
 class Config(object):
     def __init__(self, args):    
-        with open('configs/model.yaml', 'r') as f:
+
+        with open('config.yaml', 'r') as f:
             params = yaml.load(f, Loader=yaml.FullLoader)
-            params = params[args.model]
-            for p in params.items():
-                setattr(self, p[0], p[1])
+            for group in params.keys():
+                for key, val in params[group].items():
+                    setattr(self, key, val)
 
-        self.task = args.task
-        self.model_name = args.model
-        self.scheduler = args.scheduler
-        
-        self.unk_idx = 0
-        self.pad_idx = 1
-        self.bos_idx = 2
-        self.eos_idx = 3
+        self.mode = args.mode
+        self.search_method = args.search
 
-        self.clip = 1
-        self.n_epochs = 10
-        self.batch_size = 32
-        self.learning_rate = 5e-4
-        self.ckpt_path = f"ckpt/{self.model_name}.pt"
+        self.ckpt = f"ckpt/{self.task}/blend_model.pt"
+        self.tokenizer_path = f'data/{self.task}/tokenizer.json'
 
-        if self.task == 'inference':
-            self.search = args.search
-            self.device = torch.device('cpu')
-        else:
-            self.search = None
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+        use_cuda = torch.cuda.is_available()
+        self.device_type = 'cuda' \
+                           if use_cuda and self.mode != 'inference' \
+                           else 'cpu'
+        self.device = torch.device(self.device_type)
+
 
     def print_attr(self):
         for attribute, value in self.__dict__.items():
@@ -64,88 +46,75 @@ class Config(object):
 
 
 
-def init_xavier(model):
-    if hasattr(model, 'weight') and model.weight.dim() > 1:
-        nn.init.xavier_uniform_(model.weight.data)
 
+def load_tokenizer(config):
+    assert os.path.exists(config.tokenizer_path)
 
-
-def count_params(model):
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return params
+    tokenizer = Tokenizer.from_file(config.tokenizer_path)    
+    tokenizer.post_processor = TemplateProcessing(
+        single=f"{config.bos_token} $A {config.eos_token}",
+        special_tokens=[(config.bos_token, config.bos_id), 
+                        (config.eos_token, config.eos_id)]
+        )
     
-
-def check_size(model):
-    param_size, buffer_size = 0, 0
-
-    for param in model.parameters():
-        param_size += param.nelement() * param.element_size()
-    
-    for buffer in model.buffers():
-        buffer_size += buffer.nelement() * buffer.element_size()
-
-    size_all_mb = (param_size + buffer_size) / 1024**2
-    return size_all_mb
-
-
-def load_tokenizer(model_name):
-    if model_name == 'bert':
-        return T.BertTokenizer.from_pretrained()
-    elif model_name == 'albert':
-        return T.BertTokenizer.from_pretrained()
-    elif model_name == 'distil_bert':
-        return T.BertTokenizer.from_pretrained()
-    
-
     return tokenizer
 
 
-def load_model(config):
-
-    if config.model_name == 'transformer':
-        model = Transformer(config)
-        model.apply(init_xavier)
-        
-    if config.task != 'train':
-        assert os.path.exists(config.ckpt_path)
-        model_state = torch.load(config.ckpt_path, map_location=config.device)['model_state_dict']
-        model.load_state_dict(model_state)
-
-    print(f"The {config.model_name} model has loaded")
-    print(f"--- Model Params: {count_params(model):,}")
-    print(f"--- Model  Size : {check_size(model):.3f} MB")
-    return model.to(config.device)
 
 
-
-def main(config):
+def main(args):
+    set_seed()
+    config = Config(args)
     model = load_model(config)
+    tokenizer = load_tokenizer(config)
 
-    if config.task == 'train': 
-        trainer = Trainer(config, model)
+
+    if config.mode == 'train':
+        train_dataloader = load_dataloader(config, tokenizer, 'train')
+        valid_dataloader = load_dataloader(config, tokenizer, 'valid')
+        trainer = Trainer(config, model, train_dataloader, valid_dataloader)
         trainer.train()
     
-    elif config.task == 'test':
-        tester = Tester(config, model)
+    elif config.mode == 'test':
+        test_dataloader = load_dataloader(config, tokenizer, 'test')
+        tester = Tester(config, model, tokenizer, test_dataloader)
         tester.test()
     
-    elif config.task == 'inference':
-        translator = Translator(model, config)
-        translator.translate()
+    elif config.mode == 'inference':
+        generator = Generator(config, model, tokenizer)
+        generator.inference()
     
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-task', required=True)
-    parser.add_argument('-model', required=True)
-    parser.add_argument('-scheduler', default='constant', required=False)
+    parser.add_argument('-mode', required=True)
     parser.add_argument('-search', default='greedy', required=False)
     
     args = parser.parse_args()
-    assert args.task in ['train', 'test', 'inference']
-    assert args.model in ['bert', 'gpt', 'bart']
- 
-    set_seed()
-    config = Config(args)
-    main(config)
+    assert args.mode in ['train', 'test', 'inference']
+    assert args.search in ['greedy', 'beam']
+
+    if args.mode == 'train':
+        os.makedirs(f"ckpt/{args.task}", exist_ok=True)
+    else:
+        assert os.path.exists(f'ckpt/{args.task}/{args.model}_model.pt')
+
+    '''
+    적용가능한 모델은 evolved transformer
+    training방식에서는 back translation / sampling or gan or gen / or pretraining
+
+    pretraining + evolved transformer 구조 + data augmentation + gan
+
+    1. setup에서 data augmentation
+    2. pretraining
+    3. evolved transformer를 통한 학습
+    4. gan
+
+    이렇게 해서 진행 ㄱㄱㄱ
+
+
+    '''
+
+
+    main(args)

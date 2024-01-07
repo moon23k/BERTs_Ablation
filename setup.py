@@ -1,57 +1,124 @@
-import os, json
-from datasets import load_dataset
+import os, yaml, json, torch
+from collections import namedtuple
+
+from run import Config
+from module import load_dataloader
+
+from tokenizers.models import BPE
+from tokenizers import Tokenizer, normalizers
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.normalizers import NFD, Lowercase, StripAccents
+
+from tqdm import tqdm
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForSequenceClassification
+)
 
 
 
-def save_datasets(train, valid, test):
-    data_dict = {k:v for k, v in zip(['train', 'valid', 'test'], [train, valid, test])}
-    for key, val in data_dict.items():
-        with open(f'data/{key}.json', 'w') as f:
-            json.dump(val, f)
+
+def read_data(f_name):
+    with open(f"data/{f_name}", 'r') as f:
+        data = json.load(f)
+    return data
+
+
+def create_corpus():
+    corpus = []
+    f_names = os.listdir('data')
+    f_names = [f for f in f_names if 'json' in f]
+    
+    for f_name in f_names:
+        data = read_data(f_name)
+
+        for elem in data:
+            corpus.append(elem['src'].lower())
+            corpus.append(elem['trg'].lower())
+
+    with open('data/corpus.txt', 'w') as f:
+        f.write('\n'.join(corpus))
+
+    print(f"{f_names} have used to create corpus file")
 
 
 
-def filter_dataset(data, min_len=10, max_len=300):
-    filtered = []
-    for elem in data:
-        temp_dict = dict()
-        src_len, trg_len = len(elem['en']), len(elem['de'])
-        max_condition = (src_len <= max_len) & (trg_len <= max_len)
-        min_condition = (src_len >= min_len) & (trg_len >= min_len)
+def train_tokenizer():
+    corpus_path = f'data/corpus.txt'
+    assert os.path.exists(corpus_path)
+    
+    assert os.path.exists('config.yaml')
+    with open('config.yaml', 'r') as f:
+        vocab_config = yaml.load(f, Loader=yaml.FullLoader)['vocab']
 
-        if max_condition & min_condition:
-            temp_dict['src'] = elem['en']
-            temp_dict['trg'] = elem['de']
-            filtered.append(temp_dict)
+    tokenizer = Tokenizer(BPE(unk_token=vocab_config['unk_token']))
+    tokenizer.normalizer = normalizers.Sequence([NFD(), Lowercase(), StripAccents()])
+    tokenizer.pre_tokenizer = Whitespace()
+    trainer = BpeTrainer(
+        vocab_size=vocab_config['vocab_size'], 
+        special_tokens=[
+            vocab_config['pad_token'], 
+            vocab_config['unk_token'],
+            vocab_config['bos_token'],
+            vocab_config['eos_token']
+            ]
+        )
 
-    return filtered
+    tokenizer.train(files=[corpus_path], trainer=trainer)
+    tokenizer.save(f"data/tokenizer.json")
 
 
 
-def main(downsize=True, sort=True):
-    #Download datasets
-    train = load_dataset('wmt14', 'de-en', split='train')['translation']
-    valid = load_dataset('wmt14', 'de-en', split='validation')['translation']
-    test = load_dataset('wmt14', 'de-en', split='test')['translation']
 
-    train = filter_dataset(train)
-    valid = filter_dataset(valid)
-    test = filter_dataset(test)
+def generate_samples(config):
+    
+    mname = config.mname
+    device = config.device
+    generate_kwargs = config.generate_kwargs
 
-    if downsize:
-        train = train[::100]
+    tokenizer = AutoTokenizer.from_pretrained(mname)
+    model = MarianMTModel.from_pretrained(mname).to(device)
+    torch.compile(model)
+    model.eval()
 
-    if sort:
-        train = sorted(train, key=lambda x: len(x['src']))
-        valid = sorted(valid, key=lambda x: len(x['src']))
-        test = sorted(test, key=lambda x: len(x['src']))
+    sample_dataloader = load_dataloader(config, tokenizer, 'train')
 
-    save_datasets(train, valid, test)
+    samples = []
+    with torch.no_grad():
+        for batch in tqdm(sample_dataloader):
+            
+            x = batch['y'].to(device)
+            label = tokenizer.batch_decode(x, skip_special_tokens=True)
+            label = [x.replace('▁', ' ').strip() for x in label]
+
+            sample = model.generate(x, **generate_kwargs)
+            sample = tokenizer.batch_decode(sample, skip_special_tokens=True)
+            
+            for s, l in zip(sample, label):
+                samples.append({'x': s, 'y': l})
+
+    with open(f'data/{config.sampling}_sample.json', 'w') as f:
+        json.dump(samples, f)
+
+
+
+
+def main():
+
+    if sampling != 'none':
+        args = namedtuple('args', 'mode sampling search')
+        args.mode = 'generate'
+        args.sampling = sampling
+        args.search = 'greedy'  #set to just default value
+
+        config = Config(args)
+        generate_samples(config)
+
+    create_corpus()
+    train_tokenizer()
 
 
 
 if __name__ == '__main__':
     main()
-    assert os.path.exists(f'data/train.json')
-    assert os.path.exists(f'data/valid.json')
-    assert os.path.exists(f'data/test.json')
