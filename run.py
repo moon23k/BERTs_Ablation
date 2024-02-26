@@ -3,8 +3,6 @@ import os, yaml, argparse, torch
 from tokenizers import Tokenizer
 from tokenizers.processors import TemplateProcessing
 
-from transformer import set_seed, AutoTokenizer
-
 from module import (
     load_dataloader,
     load_model,
@@ -14,6 +12,20 @@ from module import (
 )
 
 
+
+
+def set_seed(SEED=42):
+    import random
+    import numpy as np
+    import torch.backends.cudnn as cudnn
+
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    cudnn.benchmark = False
+    cudnn.deterministic = True
 
 
 
@@ -97,7 +109,7 @@ if __name__ == '__main__':
     assert args.strategy.lower() in ['standard','auxiliary', 'generative', 'sampling']
     assert args.search.lower() in ['greedy', 'beam']
 
-    if args.mode != 'train'
+    if args.mode != 'train':
         assert os.path.exists(f'ckpt/{args.strategy}_model.pt')
 
 

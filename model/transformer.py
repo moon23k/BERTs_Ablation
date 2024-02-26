@@ -178,7 +178,6 @@ class Transformer(nn.Module):
 
         self.device = config.device
         self.max_len = config.max_len
-        self.model_type = config.model_type
         self.vocab_size = config.vocab_size
 
         self.enc_emb = Embeddings(config)
