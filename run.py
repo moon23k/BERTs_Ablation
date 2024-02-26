@@ -5,7 +5,6 @@ from tokenizers.processors import TemplateProcessing
 
 from transformer import set_seed, AutoTokenizer
 
-
 from module import (
     load_dataloader,
     load_model,
@@ -28,10 +27,11 @@ class Config(object):
                     setattr(self, key, val)
 
         self.mode = args.mode
+        self.strategy = args.strategy
         self.search_method = args.search
 
-        self.ckpt = f"ckpt/{self.task}/blend_model.pt"
-        self.tokenizer_path = f'data/{self.task}/tokenizer.json'
+        self.ckpt = f"ckpt/{self.strategy}_model.pt"
+        self.tokenizer_path = f'data/tokenizer.json'
 
         use_cuda = torch.cuda.is_available()
         self.device_type = 'cuda' \
@@ -89,32 +89,16 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-mode', required=True)
+    parser.add_argument('-strategy', required=True)
     parser.add_argument('-search', default='greedy', required=False)
     
     args = parser.parse_args()
-    assert args.mode in ['train', 'test', 'inference']
-    assert args.search in ['greedy', 'beam']
+    assert args.mode.lower() in ['train', 'test', 'inference']
+    assert args.strategy.lower() in ['standard','auxiliary', 'generative', 'sampling']
+    assert args.search.lower() in ['greedy', 'beam']
 
-    if args.mode == 'train':
-        os.makedirs(f"ckpt/{args.task}", exist_ok=True)
-    else:
-        assert os.path.exists(f'ckpt/{args.task}/{args.model}_model.pt')
-
-    '''
-    적용가능한 모델은 evolved transformer
-    training방식에서는 back translation / sampling or gan or gen / or pretraining
-
-    pretraining + evolved transformer 구조 + data augmentation + gan
-
-    1. setup에서 data augmentation
-    2. pretraining
-    3. evolved transformer를 통한 학습
-    4. gan
-
-    이렇게 해서 진행 ㄱㄱㄱ
-
-
-    '''
+    if args.mode != 'train'
+        assert os.path.exists(f'ckpt/{args.strategy}_model.pt')
 
 
     main(args)

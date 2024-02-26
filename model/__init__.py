@@ -1,1 +1,1 @@
-from .evolved import EvolvedTransformer
+from .transformer import Transformer

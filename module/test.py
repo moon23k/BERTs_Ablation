@@ -1,79 +1,81 @@
-import torch.nn as nn
-import math, time, torch
-from torchtext.data.metrics import bleu_score
-
-from run import load_tokenizer
-from modules.data import load_dataloader
-from modules.search import Search
+import torch, evaluate
 
 
 
 class Tester:
-    def __init__(self, config, model):
-        super(Tester, self).__init__(config, model)
-        self.model = model
-
-        if self.model.training:
-            self.model.eval()
-
-        self.tokenizer = load_tokenizer(config)
-        self.search = Search(config, self.model)
-        self.dataloader = load_dataloader(config, 'test')
-
-        self.device = config.device
-        self.pad_idx = config.pad_idx
-        self.bos_idx = config.bos_idx
-        self.eos_idx = config.eos_idx        
-        self.model_name = config.model_name
-        self.output_dim = config.output_dim
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.pad_idx, label_smoothing=0.1).to(self.device)
-
-
-    def get_bleu_score(self, pred, trg):
-        score = 0
-        batch_size = trg.size(0)
+    def __init__(self, config, model, tokenizer, test_dataloader):
+        super(Tester, self).__init__()
         
-        for can, ref in zip(pred, trg.tolist()):
-            score += bleu_score([self.tokenizer.Decode(can).split()],
-                                [[self.tokenizer.Decode(ref).split()]])
-        return (score / batch_size) * 100
+        self.model = model
+        self.tokenizer = tokenizer
+        self.dataloader = test_dataloader
 
-    @staticmethod
-    def measure_time(start_time, end_time):
-        elapsed_time = end_time - start_time
-        elapsed_min = int(elapsed_time / 60)
-        elapsed_sec = int(elapsed_time - (elapsed_min * 60))
-        return f"{elapsed_min}m {elapsed_sec}s"
+        self.task = config.task
+        self.bos_id = config.bos_id
+        self.eos_id = config.eos_id
+        self.device = config.device
+        self.max_len = config.max_len
+        self.model_type = config.model_type
+        
+        self.metric_module = evaluate.load('bleu')
+        
 
 
     def test(self):
+        score = 0.0         
         self.model.eval()
-        tot_len = len(self.dataloader)
-        tot_loss, tot_greedy_bleu, tot_beam_bleu = 0.0, 0.0, 0.0
-        start_time = time.time()
-        
+
         with torch.no_grad():
-            for idx, batch in enumerate(self.dataloader):
-                src, trg = batch['src'].to(self.device), batch['trg'].to(self.device)
+            for batch in self.dataloader:
+                x = batch['x'].to(self.device)
+                y = self.tokenize(batch['y'])
 
-                logit = self.model(src, trg[:, :-1])
-                greedy_pred = self.Search.greedy_search(src)
-                beam_pred = self.Search.beam_search(src)
+                pred = self.predict(x)
+                pred = self.tokenize(pred)
+                
+                score += self.evaluate(pred, y)
 
-                loss = self.criterion(logit.contiguous().view(-1, self.output_dim), 
-                                      trg[:, 1:].contiguous().view(-1)).item()
+        txt = f"TEST Result on {self.task.upper()} with {self.model_type.upper()} model"
+        txt += f"\n-- Score: {round(score/len(self.dataloader), 2)}\n"
+        print(txt)
 
-                beam_bleu = self.get_bleu_score(beam_pred, trg)    
-                greedy_bleu = self.get_bleu_score(greedy_pred, trg)
 
-                tot_loss += loss
-                tot_beam_bleu += beam_bleu
-                tot_greedy_bleu += greedy_bleu
+    def tokenize(self, batch):
+        return [self.tokenizer.decode(x) for x in batch.tolist()]
 
-        tot_loss /= tot_len
-        tot_beam_bleu /= tot_len
-        tot_greedy_bleu /= tot_len
-        
-        print(f'Test Results on {self.model_name} model | Time: {self.measure_time(start_time, time.time())}')
-        print(f">> Test Loss: {tot_loss:3f} | Test PPL: {math.exp(tot_loss):2f}")
-        print(f">> Greedy BLEU: {tot_greedy_bleu:2f} | Beam BLEU: {tot_beam_bleu:2f}")
+
+    def predict(self, x):
+
+        batch_size = x.size(0)
+        pred = torch.zeros((batch_size, self.max_len))
+        pred = pred.type(torch.LongTensor).to(self.device)
+        pred[:, 0] = self.bos_id
+
+        e_mask = self.model.pad_mask(x)
+        memory = self.model.encoder(x, e_mask)
+
+        for idx in range(1, self.max_len):
+            y = pred[:, :idx]
+            d_out = self.model.decoder(y, memory, e_mask, None)
+
+            logit = self.model.generator(d_out)
+            pred[:, idx] = logit.argmax(dim=-1)[:, -1]
+
+            #Early Stop Condition
+            if (pred == self.eos_id).sum().item() == batch_size:
+                break
+
+        return pred
+
+
+
+    def evaluate(self, pred, label):
+        if all(elem == '' for elem in pred):
+            return 0.0
+
+        score = self.metric_module.compute(
+            predictions=pred, 
+            references =[[l] for l in label]
+        )['bleu']
+
+        return score * 100

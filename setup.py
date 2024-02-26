@@ -1,46 +1,50 @@
-import os, yaml, json, torch
-from collections import namedtuple
-
-from run import Config
-from module import load_dataloader
-
+import os, re, json, yaml
+from datasets import load_dataset
 from tokenizers.models import BPE
 from tokenizers import Tokenizer, normalizers
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.normalizers import NFD, Lowercase, StripAccents
 
-from tqdm import tqdm
-from transformers import (
-    AutoTokenizer, 
-    AutoModelForSequenceClassification
-)
 
 
 
-
-def read_data(f_name):
-    with open(f"data/{f_name}", 'r') as f:
-        data = json.load(f)
-    return data
-
-
-def create_corpus():
-    corpus = []
-    f_names = os.listdir('data')
-    f_names = [f for f in f_names if 'json' in f]
+def process_data(orig_data, data_volumn):
     
-    for f_name in f_names:
-        data = read_data(f_name)
+    min_len = 10 
+    max_len = 300
+    max_diff = 50
+    volumn_cnt = 0
 
-        for elem in data:
-            corpus.append(elem['src'].lower())
-            corpus.append(elem['trg'].lower())
+    corpus, processed = [], []
+    
+    
+    for elem in orig_data:
+        temp_dict = dict()
+        x, y = elem['en'].strip().lower(), elem['de'].strip().lower()
+        x_len, y_len = len(x), len(y)
 
+        #Filtering Conditions
+        min_condition = (x_len >= min_len) & (y_len >= min_len)
+        max_condition = (x_len <= max_len) & (y_len <= max_len)
+        dif_condition = abs(x_len - y_len) < max_diff
+
+        if max_condition & min_condition & dif_condition:
+            corpus.append(x)
+            corpus.append(y)
+            processed.append({'x': x, 'y':y})
+            
+            #End condition
+            volumn_cnt += 1
+            if volumn_cnt == data_volumn:
+                break
+
+    #Save Corpus
     with open('data/corpus.txt', 'w') as f:
         f.write('\n'.join(corpus))
 
-    print(f"{f_names} have used to create corpus file")
+    return processed 
+
 
 
 
@@ -70,55 +74,34 @@ def train_tokenizer():
 
 
 
+def save_data(data_obj):
+    #split data into train/valid/test sets
+    train, valid, test = data_obj[:-5100], data_obj[-5100:-100], data_obj[-100:]
+    data_dict = {k:v for k, v in zip(['train', 'valid', 'test'], [train, valid, test])}
 
-def generate_samples(config):
-    
-    mname = config.mname
-    device = config.device
-    generate_kwargs = config.generate_kwargs
-
-    tokenizer = AutoTokenizer.from_pretrained(mname)
-    model = MarianMTModel.from_pretrained(mname).to(device)
-    torch.compile(model)
-    model.eval()
-
-    sample_dataloader = load_dataloader(config, tokenizer, 'train')
-
-    samples = []
-    with torch.no_grad():
-        for batch in tqdm(sample_dataloader):
-            
-            x = batch['y'].to(device)
-            label = tokenizer.batch_decode(x, skip_special_tokens=True)
-            label = [x.replace('▁', ' ').strip() for x in label]
-
-            sample = model.generate(x, **generate_kwargs)
-            sample = tokenizer.batch_decode(sample, skip_special_tokens=True)
-            
-            for s, l in zip(sample, label):
-                samples.append({'x': s, 'y': l})
-
-    with open(f'data/{config.sampling}_sample.json', 'w') as f:
-        json.dump(samples, f)
+    for key, val in data_dict.items():
+        with open(f'data/{key}.json', 'w') as f:
+            json.dump(val, f)        
+        assert os.path.exists(f'data/{key}.json')
 
 
 
 
 def main():
+    #Load Original Data
+    orig_data = load_dataset('wmt14', 'de-en', split='train')['translation']
 
-    if sampling != 'none':
-        args = namedtuple('args', 'mode sampling search')
-        args.mode = 'generate'
-        args.sampling = sampling
-        args.search = 'greedy'  #set to just default value
+    #PreProcess Data
+    data_volumn = 55100
+    processed_data = process_data(orig_data, data_volumn)
 
-        config = Config(args)
-        generate_samples(config)
-
-    create_corpus()
+    #Train Tokenizer
     train_tokenizer()
+
+    #Save Data
+    save_data(processed_data)
 
 
 
 if __name__ == '__main__':
-    main()
+    main()    
