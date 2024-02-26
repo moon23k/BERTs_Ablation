@@ -1,38 +1,33 @@
-## BERTs_Ablation
-Since the advent of bert, various variant models have been created. Improvements have been applied to the existing bert's problems in each model.
-This repo briefly reviews the concept of each model, and compares the performance of these models when applied to machine translation task.
+## Exposure bias Alleviation Strategy Exploration
+This repository presents a series of code implementations aimed at alleviating Exposure Bias, a persistent issue in natural language generation models.
 
-<br>
-<br>
+<br> <br>
 
-## Models
+## Strategy
 
-**BERT**
-
-<br>
-
-**ALBERT**
+**Standard**
 
 <br>
 
-**XLNet**
+**Auxiliary**
 
 <br>
 
-**RoBERTa**
+**Sampling**
 
 <br>
-<br>
 
-## Configs
+**Generative**
 
-<br>
-<br>
+<br><br>
+
+## Setups
+
+<br><br>
 
 ## Results
 
-<br>
-<br>
+<br><br>
 
 ## Reference
 
