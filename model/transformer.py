@@ -1,4 +1,4 @@
-import copy, math, torch
+import copy, math, random, torch
 import torch.nn as nn
 from collections import namedtuple
 
@@ -168,10 +168,9 @@ class Decoder(nn.TransformerDecoder):
 
 
 
-class Transformer(nn.Module):
+class ModelBase(nn.Module):
     def __init__(self, config):
-        super(Transformer, self).__init__()
-
+        super(ModelBase, self).__init__()
         self.bos_id = config.bos_id
         self.eos_id = config.eos_id
         self.pad_id = config.pad_id
@@ -179,6 +178,123 @@ class Transformer(nn.Module):
         self.device = config.device
         self.max_len = config.max_len
         self.vocab_size = config.vocab_size
+        
+        self.strategy = config.strategy
+        self.auxiliary_ratio = config.auxiliary_ratio
+        self.sampling_ratio = config.sampling_ratio
+
+        self.out = namedtuple('Out', 'logit loss')
+        self.criterion = nn.CrossEntropyLoss()
+
+
+    def auxiliary_loss(self, y, memory, e_mask, loss):
+        label = y[:, 1]
+        y = y[:, 0].unsqueeze(1)
+
+        dec_out, _ = self.decode(y, memory, None, e_mask, None)
+        logit = self.generator(dec_out)
+
+        _loss = self.criterion(
+            logit.contiguous().view(-1, self.vocab_size), 
+            label.contiguous().view(-1)
+        )
+        
+        aux_loss = loss * (1 - self.auxiliary_ratio) + _loss * self.auxiliary_ratio
+
+        return aux_loss
+
+
+    def recurrent_loss(self, logit, y, label, memory, e_mask):
+        bs, seq_len = y.shape
+        pred = logit.argmax(dim=-1)
+
+        sampled = torch.empty(bs, seq_len, dtype=torch.long)
+        sampled = sampled.fill_(self.pad_id).to(self.device)
+        sampled[:, 0] = self.bos_id
+
+        for t in range(1, seq_len):
+            if random.random() < self.sampling_ratio:
+                sampled[:, t] = y[:, t]
+            else:
+                sampled[:, t] = pred[:, t]
+        
+        d_mask = self.dec_mask(sampled)
+        dec_out, _ = self.decode(sampled, memory, None, e_mask, d_mask)
+        logit = self.generator(dec_out)
+        
+        loss = self.criterion(
+            logit.contiguous().view(-1, self.vocab_size), 
+            label.contiguous().view(-1)
+        )
+
+        return loss 
+
+
+    def teacher_forcing_forward(self, x, y):
+        y, label = self.shift_y(y)
+        
+        e_mask = self.pad_mask(x)
+        d_mask = self.dec_mask(y)
+
+        memory = self.encode(x, e_mask)
+
+        dec_out, _ = self.decode(y, memory, None, e_mask, d_mask, use_cache=False)
+        logit = self.generator(dec_out)
+
+        self.out.logit = logit
+        loss = self.criterion(
+            logit.contiguous().view(-1, self.vocab_size), 
+            label.contiguous().view(-1)
+        ) if self.strategy != 'sampling' else None
+
+        #Getting Loss Process             
+        if self.strategy == 'auxiliary':
+            self.out.loss = self.auxiliary_loss(y, memory, e_mask, loss)
+        elif self.strategy == 'sampling':
+            self.out.loss = self.sampling_loss(logit, y, label, memory, e_mask)
+        else:
+            self.out.loss = loss
+            
+        return self.out
+
+
+
+    def generative_forward(self, x, y):
+
+        _, label = self.shift_y(y)
+        batch_size, output_len = label.shape
+        
+        pred = torch.zeros((batch_size, 1), dtype=torch.long)
+        pred = pred.fill_(self.bos_id).to(self.device)
+        logit = torch.empty(batch_size, output_len, self.vocab_size).to(self.device)
+
+        cache = None
+        e_mask = self.pad_mask(x)
+        memory = self.encode(x, e_mask)
+
+        for idx in range(1, output_len+1):
+            y = pred[:, :idx]
+            d_out, cache = self.decode(y, memory, cache, e_mask, use_cache=True)
+
+            curr_logit = self.generator(d_out[:, -1:, :])
+            curr_pred = curr_logit.argmax(dim=-1)
+
+            logit[:, idx-1:idx, :] = curr_logit
+            pred = torch.cat([pred, curr_pred], dim=1)
+        
+        self.out.logit = logit
+        self.out.loss = self.criterion(
+            logit.contiguous().view(-1, self.vocab_size), 
+            label.contiguous().view(-1)
+        )        
+
+        return self.out
+
+
+
+class Transformer(ModelBase):
+    def __init__(self, config):
+        super(Transformer, self).__init__(config)
 
         self.enc_emb = Embeddings(config)
         self.encoder = Encoder(config)
@@ -195,9 +311,6 @@ class Transformer(nn.Module):
         )
 
         self.generator = nn.Linear(config.hidden_dim, self.vocab_size)
-
-        self.out = namedtuple('Out', 'logit loss')
-        self.criterion = nn.CrossEntropyLoss()
 
 
     @staticmethod
@@ -220,72 +333,16 @@ class Transformer(nn.Module):
         return x
 
 
-    def decode(
-        self, x, memory, cache=None, 
-        e_mask=None, d_mask=None, use_cache=False
-        ):
+    def decode(self, x, memory, cache=None, 
+               e_mask=None, d_mask=None, use_cache=False):
         
         x = self.dec_emb(x)
         x, cache = self.decoder(x, memory, cache, e_mask, d_mask, use_cache)
         return x, cache        
         
 
-    def teacher_forcing_forward(self, x, y):
-        y, label = self.shift_y(y)
-        
-        e_mask = self.pad_mask(x)
-        d_mask = self.dec_mask(y)
-
-        memory = self.encode(x, e_mask)
-
-        dec_out, _ = self.decode(y, memory, None, e_mask, d_mask, use_cache=False)
-        logit = self.generator(dec_out)
-
-        self.out.logit = logit
-        self.out.loss = self.criterion(
-            logit.contiguous().view(-1, self.vocab_size), 
-            label.contiguous().view(-1)
-        )
-
-        return self.out
-    
-
-    def generative_forward(self, x, y):
-
-        _, label = self.shift_y(y)
-        batch_size, output_len = label.shape
-        logit = torch.empty(batch_size, output_len, self.vocab_size).to(self.device)
-        
-
-        pred = torch.zeros((batch_size, 1), dtype=torch.long)
-        pred = pred.fill_(self.bos_id).to(self.device)
-
-        cache=None
-        e_mask = self.pad_mask(x)
-        memory = self.encode(x, e_mask)
-
-        for idx in range(1, output_len+1):
-            y = pred[:, :idx]
-            d_out, cache = self.decode(y, memory, cache, e_mask, use_cache=True)
-
-            curr_logit = self.generator(d_out[:, -1:, :])
-            curr_pred = curr_logit.argmax(dim=-1)
-
-            logit[:, idx-1:idx, :] = curr_logit
-            pred = torch.cat([pred, curr_pred], dim=1)
-        
-        self.out.logit = logit
-        self.out.loss = self.criterion(
-            logit.contiguous().view(-1, self.vocab_size), 
-            label.contiguous().view(-1)
-        )        
-
-        return self.out
-        
-
-
-    def forward(self, x, y):
-        if self.model_type == 'generative':
+    def forward(self, x, y, is_generative=False):
+        if is_generative:  #This process if only for 'generative' Strategy
             return self.generative_forward(x, y)
-        return self.teacher_forcing_forward(x, y)
-
+        else: #This process contains ['standard', 'auxiliary', 'recurrent'] Strategies
+            return self.teacher_forcing_forward(x, y)

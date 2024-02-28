@@ -24,7 +24,11 @@ train:
     n_epochs: 10
     batch_size: 32
     lr: 0.0005
+    fine_lr: 0.00025
     early_stop: 1
     patience: 3
     clip: 1
+    auxiliary_ratio: 0.1
+    sampling_ratio: 0.1
+    iters_to_generate: 10
     iters_to_accumulate: 4
