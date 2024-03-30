@@ -12,6 +12,7 @@ from module import (
 )
 
 
+
 def set_seed(SEED=42):
     import random
     import numpy as np
@@ -24,6 +25,7 @@ def set_seed(SEED=42):
     torch.cuda.manual_seed_all(SEED)
     cudnn.benchmark = False
     cudnn.deterministic = True
+
 
 
 class Config(object):
@@ -43,7 +45,7 @@ class Config(object):
             self.lr = self.fine_lr
 
         self.base_ckpt = 'ckpt/baseline_model.pt'
-        self.ckpt = f"ckpt/{self.strategy}_model.pt"
+        self.ckpt = f"ckpt/{self.strategy}_ft_model.pt"
         self.tokenizer_path = f'data/tokenizer.json'
 
         use_cuda = torch.cuda.is_available()
@@ -82,7 +84,7 @@ def main(args):
     tokenizer = load_tokenizer(config)
 
 
-    if config.mode == 'train':
+    if config.mode == ['train', 'finetune']:
         train_dataloader = load_dataloader(config, tokenizer, 'train')
         valid_dataloader = load_dataloader(config, tokenizer, 'valid')
         trainer = Trainer(config, model, train_dataloader, valid_dataloader)
@@ -102,7 +104,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-mode', required=True)
-    parser.add_argument('-strategy', required=True)
+    parser.add_argument('-strategy', default='standard', required=True)
     parser.add_argument('-search', default='greedy', required=False)
     
     args = parser.parse_args()
@@ -110,9 +112,9 @@ if __name__ == '__main__':
     assert args.strategy.lower() in ['standard','auxiliary', 'recurrent', 'generative']
     assert args.search.lower() in ['greedy', 'beam']
 
-    if args.mode == 'train':
+    if args.mode == 'finetune':
         assert os.path.exists('ckpt/baseline_model.pt')
     elif args.mode in ['test', 'inference']:
-        assert os.path.exists(f'ckpt/{args.strategy}_model.pt')
+        assert os.path.exists(f'ckpt/{args.strategy}_ft_model.pt')
 
     main(args)
